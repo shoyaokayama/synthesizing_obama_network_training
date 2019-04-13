@@ -26,7 +26,7 @@ class Speech(TFBase):
     self.parser.add_argument('--input', type=str, default='',
                        help='input for generation')
     self.parser.add_argument('--input2', type=str, default='',
-                       help='input for any mfcc wav file')
+                       help='input for any mfcc wav file name withou extension that was located in audio/normalize-cep13')
     self.parser.add_argument('--guy', type=str, default='Obama2',
                        help='dataset')
     self.parser.add_argument('--normalizeoutput', action='store_true')
@@ -52,17 +52,24 @@ class Speech(TFBase):
       self.train()
 
   def createInputFeature(self, audio, audiodiff, timestamps, startframe, nframe):
+    # bisect is binary search algorithm
+    # スタート時間 <- 第二引数を挿入できるインデックスの左側のインデックス
     startAudio = bisect.bisect_left(timestamps, (startframe - 1) / self.fps)
+    # 終了時間 <- 第二引数を挿入できるインデックスの右側のインデックス
     endAudio = bisect.bisect_right(timestamps, (startframe + nframe - 2) / self.fps)
-
+    # print("audio:{}".format(audio.shape))
+    # print("audiodiff:{}".format(audiodiff.shape))
+    # 配列結合
     inp = np.concatenate((audio[startAudio:endAudio, :-1], audiodiff[startAudio:endAudio, :]), axis=1)
-    return startAudio, endAudio, inp 
+    return startAudio, endAudio, inp
 
 
   def preprocess(self, save_dir):
     files = [x.split("\t")[0].strip() for x in open(self.training_dir + "processed_fps.txt", "r").readlines()]
 
+    # audio
     inps = {"training": [], "validation": []}
+    # mouth?
     outps = {"training": [], "validation": []}
 
     # validation = 0.2
@@ -72,23 +79,26 @@ class Speech(TFBase):
 
       dnums = sorted([os.path.basename(x) for x in glob.glob(self.training_dir + files[i] + "}}*")])
 
-      audio = np.load(self.training_dir + "/audio/normalized-cep13/" + files[i] + ".wav.npy") 
+      audio = np.load(self.training_dir + "/audio/normalized-cep13/" + files[i] + ".wav.npy")
+      # 1から最後と0から最後の1つ手前の差
       audiodiff = audio[1:,:-1] - audio[:-1, :-1]
 
-      print files[i], audio.shape, tp
+      print (files[i], audio.shape, tp)
       timestamps = audio[:, -1]
-
+      # print(timestamps)
       for dnum in dnums:
-        print dnum 
+        print (dnum)
+        #
         fids = readCVFloatMat(self.training_dir + dnum + "/frontalfidsCoeff_unrefined.bin")
         if not os.path.exists(self.training_dir + dnum + "/startframe.txt"):
           startframe = 1
         else:
+          # readSingleInt (string -> int) in file.
           startframe = readSingleInt(self.training_dir + dnum + "/startframe.txt")
         nframe = readSingleInt(self.training_dir + dnum + "/nframe.txt")
-
+        # スタート時間, 終了時間, mfcc係数?(28次元(ベクトル+音の大きさの対数平均))
         startAudio, endAudio, inp = self.createInputFeature(audio, audiodiff, timestamps, startframe, nframe)
-
+        # print(inp.shape)
         outp = np.zeros((endAudio - startAudio, fids.shape[1]), dtype=np.float32)
         leftmark = 0
         for aud in range(startAudio, endAudio):
@@ -97,7 +107,7 @@ class Speech(TFBase):
             leftmark += 1
           t = (audiotime - (startframe - 1 + leftmark) / self.fps) * self.fps;
           outp[aud - startAudio, :] = fids[leftmark, :] * (1 - t) + fids[min(len(fids) - 1, leftmark + 1), :] * t;
-            
+
         inps[tp].append(inp)
         outps[tp].append(outp)
 
@@ -127,18 +137,21 @@ class Speech(TFBase):
       output_w = tf.get_variable("output_w", [args.rnn_size, self.dimout])
       output_b = tf.get_variable("output_b", [self.dimout])
 
-    inputs = tf.split(1, args.seq_length, self.input_data)
+    # Old code
+    #inputs = tf.split(1, args.seq_length, self.input_data)
+    inputs = tf.split(value=self.input_data, num_or_size_splits=args.seq_length, axis=1)
     inputs = [tf.squeeze(input_, [1]) for input_ in inputs]
 
-    outputs, states = tf.nn.seq2seq.rnn_decoder(inputs, self.initial_state, self.network, loop_function=None, scope='rnnlm')
+    outputs, states = tf.contrib.legacy_seq2seq.rnn_decoder(inputs, self.initial_state, self.network, loop_function=None, scope='rnnlm')
 
-    output = tf.reshape(tf.concat(1, outputs), [-1, args.rnn_size])
+    #output = tf.reshape(tf.concat(1, outputs), [-1, args.rnn_size])
+    output = tf.reshape(tf.concat(outputs, axis=1), [-1, args.rnn_size])
     output = tf.nn.xw_plus_b(output, output_w, output_b)
     self.final_state = states
     self.output = output
 
     flat_target_data = tf.reshape(self.target_data,[-1, self.dimout])
-        
+
     lossfunc = tf.reduce_sum(tf.squared_difference(flat_target_data, output))
     #lossfunc = tf.reduce_sum(tf.abs(flat_target_data - output))
     self.cost = lossfunc / (args.batch_size * args.seq_length * self.dimout)
@@ -161,7 +174,7 @@ class Speech(TFBase):
           else:
             newinps[key].append(inps[key][i])
             newoutps[key].append(outps[key][i])
-    print "load preprocessed", len(newinps), len(newoutps)
+    print ("load preprocessed", len(newinps), len(newoutps))
     return newinps, newoutps
 
 
@@ -173,7 +186,7 @@ class Speech(TFBase):
 
   def sample_audioinput(self, sess, args, data, pt):
     meani, stdi, meano, stdo = data["inputmean"], data["inputstd"], data["outputmean"], data["outputstd"]
-    audio = np.load(self.training_dir + "/audio/normalized-cep13/" + self.args.input2 + ".wav.npy") 
+    audio = np.load(self.training_dir + "/audio/normalized-cep13/" + self.args.input2 + ".wav.npy")
 
     audiodiff = audio[1:,:-1] - audio[:-1, :-1]
     timestamps = audio[:, -1]
@@ -189,7 +202,7 @@ class Speech(TFBase):
       os.mkdir("results/")
 
     f = open("results/" + self.args.input2 + "_" + args.save_dir + ".txt", "w")
-    print "output to results/" + self.args.input2 + "_" + args.save_dir + ".txt"
+    print ("output to results/" + self.args.input2 + "_" + args.save_dir + ".txt")
     f.write("%d %d\n" % (len(inp), self.dimout + 1))
     fetches = []
     fetches.append(self.output)
@@ -214,7 +227,7 @@ class Speech(TFBase):
       f.write(("%f " % shifttime) + " ".join(["%f" % x for x in output[0]]) + "\n")
 
       state_flat = res[1:]
-      state = [state_flat[i:i+2] for i in range(0, len(state_flat), 2)] 
+      state = [state_flat[i:i+2] for i in range(0, len(state_flat), 2)]
     f.close()
 
 
@@ -223,5 +236,3 @@ def main():
 
 if __name__ == '__main__':
   main()
-
-

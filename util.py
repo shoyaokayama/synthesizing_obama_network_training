@@ -7,10 +7,12 @@ import struct
 import argparse
 import time
 import os
-import cPickle
+import _pickle as cPickle
 import random
 import platform
 import glob
+# macos pickleError 回避用 cpickle.dump() -> pickle_dump()
+from MacOSpickle import pickle_dump, pickle_load
 
 plat = platform.dist()[0]
 if plat == "Ubuntu":
@@ -23,12 +25,20 @@ def readSingleInt(path):
     return int(f.readline())
 
 def readCVFloatMat(fl):
-  f = open(fl)
+  print("(readCVFloatMat) File name : "+fl)
+  f = open(fl, 'rb')
+  # read(i) reading (i)byte.
+  # B is unsigned char 1byte
   t = struct.unpack('B', f.read(1))[0]
+  # print(t)
   if t != 5:
     return 0
+  # i is int 4byte
   h = struct.unpack('i', f.read(4))[0]
   w = struct.unpack('i', f.read(4))[0]
+  # print(h)
+  # print(w)
+  # (h * w) * float(4byte)
   return np.reshape(np.array(struct.unpack('%df' % (h * w), f.read(4 * h * w)), float), (h, w))
 
 def _str_to_bool(s):
@@ -45,7 +55,7 @@ def add_boolean_argument(parser, name, default=False):
 def normalizeData(lst, savedir, name, varnames, normalize=True):
   allstrokes = np.concatenate(lst)
   mean = np.mean(allstrokes, 0)
-  std = np.std(allstrokes, 0) 
+  std = np.std(allstrokes, 0)
 
   f = open(savedir + "/" + name + ".txt", "w")
   minv = np.min(allstrokes, 0)
@@ -76,6 +86,7 @@ class TFBase(object):
     random.seed(42)
     self.parser = argparse.ArgumentParser()
     self.addDefaultParameters()
+
 
   def addDefaultParameters(self):
     self.parser.add_argument('--num_epochs', type=int, default=300,
@@ -123,23 +134,26 @@ class TFBase(object):
       data_file = "data/training_" + self.args.save_dir + ".cpkl"
 
     if not (os.path.exists(data_file)) or self.args.reprocess:
-      print "creating training data cpkl file from raw source"
+      print ("creating training data cpkl file from raw source")
+      # inps(audio), outps(mouth?)
       inps, outps = self.preprocess(data_file)
 
       meani, stdi, meano, stdo = self.normalize(inps, outps)
 
       if not os.path.exists(os.path.dirname(data_file)):
         os.mkdir(os.path.dirname(data_file))
-      f = open(data_file, "wb")
-      cPickle.dump({"input": inps["training"], "inputmean": meani, "inputstd": stdi, "output": outps["training"], "outputmean":meano, "outputstd": stdo, "vinput": inps["validation"], "voutput": outps["validation"]}, f, protocol=2) 
-      f.close() 
+
+      # f = open(data_file, "wb")
+      # print(f)
+      pickle_dump({"input": inps["training"], "inputmean": meani, "inputstd": stdi, "output": outps["training"], "outputmean":meano, "outputstd": stdo, "vinput": inps["validation"], "voutput": outps["validation"]}, data_file)
 
 
-    f = open(data_file,"rb")
-    data = cPickle.load(f)
-    inps = {"training": data["input"], "validation": data["vinput"]} 
-    outps = {"training": data["output"], "validation": data["voutput"]} 
-    f.close()
+
+    # f = open(data_file,"rb")
+    data = pickle_load(data_file)
+    inps = {"training": data["input"], "validation": data["vinput"]}
+    outps = {"training": data["output"], "validation": data["voutput"]}
+
 
     self.dimin = inps["training"][0].shape[1]
     self.dimout = outps["training"][0].shape[1]
@@ -161,17 +175,17 @@ class TFBase(object):
     # returns a randomised, seq_length sized portion of the training data
     x_batch = []
     y_batch = []
-    for i in xrange(self.args.batch_size):
+    for i in range(self.args.batch_size):
       inp = self.inps[key][self.pointer[key]]
       outp = self.outps[key][self.pointer[key]]
 
-      n_batch = int(math.ceil((len(inp) - 2) / self.args.seq_length)) 
+      n_batch = int(math.ceil((len(inp) - 2) / self.args.seq_length))
 
       idx = random.randint(1, len(inp) - self.args.seq_length - 1)
       x_batch.append(np.copy(inp[idx:idx+self.args.seq_length]))
       y_batch.append(np.copy(outp[idx:idx+self.args.seq_length]))
 
-      if random.random() < 1.0 / float(n_batch): 
+      if random.random() < 1.0 / float(n_batch):
         self.tick_batch_pointer(key)
     return x_batch, y_batch
 
@@ -185,19 +199,20 @@ class TFBase(object):
 
 
   def test(self):
+    print("test method running")
     # only use save_dir from args
     save_dir = self.args.save_dir
 
-    with open(os.path.join("save/" + save_dir, 'config.pkl')) as f:
-      saved_args = cPickle.load(f)
+    # with open(os.path.join("save/" + save_dir, 'config.pkl'), "rb") as f:
+    saved_args = pickle_load(os.path.join("save/" + save_dir, 'config.pkl'))
 
     if len(saved_args.usetrainingof):
       pt = saved_args.usetrainingof
     else:
       pt = save_dir
 
-    with open("./data/training_" + pt + ".cpkl", "rb") as f:
-      raw = cPickle.load(f)
+    # with open("./data/training_" + pt + ".cpkl", "rb") as f:
+    raw = pickle_load("./data/training_" + pt + ".cpkl")
 
     model = self.model(saved_args, True)
     sess = tf.InteractiveSession()
@@ -205,31 +220,33 @@ class TFBase(object):
 
     ckpt = tf.train.get_checkpoint_state("save/" + save_dir)
     saver.restore(sess, ckpt.model_checkpoint_path)
-    print "loading model: ", ckpt.model_checkpoint_path
+    print ("loading model: ", ckpt.model_checkpoint_path)
 
     saved_args.input = self.args.input
 
     self.sample(sess, saved_args, raw, pt)
 
   def train(self):
-    with open(os.path.join("save/" + self.args.save_dir, 'config.pkl'), 'w') as f:
-      cPickle.dump(self.args, f)
+    print("training method is running")
+    # with open(os.path.join("save/" + self.args.save_dir, 'config.pkl'), 'wb') as f:
+    pickle_dump(self.args, os.path.join("save/" + self.args.save_dir, 'config.pkl'))
 
     with tf.Session() as sess:
       model = self.model(self.args)
 
-      tf.initialize_all_variables().run()
+      # tf.initialize_all_variables().run()
+      tf.global_variables_initializer().run()
       ts = TrainingStatus(sess, self.args.num_epochs, self.num_batches["training"], save_interval = self.args.save_every, graph = sess.graph, save_dir = "save/" + self.args.save_dir)
 
-      print "training batches: ", self.num_batches["training"]
-      for e in xrange(ts.startEpoch, self.args.num_epochs):
+      print ("training batches: ", self.num_batches["training"])
+      for e in range(ts.startEpoch, self.args.num_epochs):
         sess.run(tf.assign(self.lr, self.args.learning_rate * (self.args.decay_rate ** e)))
         self.reset_batch_pointer("training")
         self.reset_batch_pointer("validation")
 
 
         state = []
-        for c, m in self.initial_state: 
+        for c, m in self.initial_state:
           state.append((c.eval(), m.eval()))
 
         fetches = []
@@ -240,7 +257,7 @@ class TFBase(object):
         for i, (c, m) in enumerate(self.initial_state):
           feed_dict[c], feed_dict[m] = state[i]
 
-        for b in xrange(self.num_batches["training"]):
+        for b in range(self.num_batches["training"]):
           ts.tic()
           x, y = self.next_batch()
 
@@ -250,13 +267,13 @@ class TFBase(object):
           res = sess.run(fetches, feed_dict)
           train_loss = res[0]
 
-          print ts.tocBatch(e, b, train_loss)
+          print (ts.tocBatch(e, b, train_loss))
 
         validLoss = 0
         if self.num_batches["validation"] > 0:
           fetches = []
           fetches.append(self.cost)
-          for b in xrange(self.num_batches["validation"]):
+          for b in range(self.num_batches["validation"]):
             x, y = self.next_batch("validation")
 
             feed_dict[self.input_data] = x
@@ -265,7 +282,7 @@ class TFBase(object):
             loss = sess.run(fetches, feed_dict)
             validLoss += loss[0]
           validLoss /= self.num_batches["validation"]
-          
+
         ts.tocEpoch(sess, e, validLoss)
 
 
@@ -281,17 +298,18 @@ class TrainingStatus:
     self.save_dir = save_dir
     self.model_dir = os.path.join(save_dir, 'model.ckpt')
     #self.saver = tf.train.Saver(tf.all_variables(), max_to_keep = 0)
-    self.saver = tf.train.Saver(tf.all_variables())
+    # self.saver = tf.train.Saver(tf.all_variables())
+    self.saver = tf.train.Saver(tf.global_variables())
 
-    lastCheckpoint = tf.train.latest_checkpoint(save_dir) 
+    lastCheckpoint = tf.train.latest_checkpoint(save_dir)
     if lastCheckpoint is None:
       self.startEpoch = 0
     else:
-      print "Last checkpoint :", lastCheckpoint
+      print ("Last checkpoint :", lastCheckpoint)
       self.startEpoch = int(lastCheckpoint.split("-")[-1])
       self.saver.restore(sess, lastCheckpoint)
 
-    print "startEpoch = ", self.startEpoch
+    print ("startEpoch = ", self.startEpoch)
 
     self.logwrite_interval = logwrite_interval
     self.eta_interval = eta_interval
@@ -335,9 +353,9 @@ class TrainingStatus:
   def tocEpoch(self, sess, e, validLoss=0):
     if (e + 1) % self.save_interval == 0 or e == self.num_epochs - 1:
       self.saver.save(sess, self.model_dir, global_step = e + 1)
-      print "model saved to {}".format(self.model_dir)
+      print ("model saved to {}".format(self.model_dir))
 
-    
+
     lines = open(self.save_dir + "/avgloss.txt", "r").readlines()
     with open(self.save_dir + "/avgloss.txt", "w") as f:
       for line in lines:
@@ -348,5 +366,3 @@ class TrainingStatus:
 
     self.avgcount = 0
     self.avgloss = 0;
-
-
